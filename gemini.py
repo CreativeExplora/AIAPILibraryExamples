@@ -26,20 +26,55 @@ The model should match the complexity of the user's input. For example, if the u
 
 client = genai.Client()
 
-chat= client.chats.create(
-        model="gemini-2.5-flash",
-        config=types.GenerateContentConfig(
-            temperature=0.5,
-            system_instruction=FINANCIAL_SYSTEM_PROMPT)
-    )
+class NodePlan(BaseModel):
+    nodes: list[dict] = Field(description="List of nodes to create, each with 'name' and 'description'")
 
-def plan_nodes_to_create() -> list[str]:
-    return chat.send_message_stream(["[INTERNAL USE ONLY] Plan the nodes to create based on the user's input."], 
-        config={
-            "response_mime_type": "application/json",
-            "response_json_schema": list[str],
-        }
+def create_nodes_from_plan(user_message, file_refs=None):
+    """Plan and create all nodes at once based on user input."""
+    print("\n[PLANNING] Analyzing input and planning nodes...")
+
+    # Create planning prompt
+    plan_prompt = f"{user_message}\n\n[INTERNAL] Create a comprehensive plan of all financial nodes needed. Return JSON with structure: {{'nodes': [{{'name': 'node_name', 'description': 'node_desc'}}]}}"
+
+    # Get the plan
+    if file_refs:
+        plan_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[*file_refs, plan_prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=NodePlan,
+            )
+        )
+    else:
+        plan_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=plan_prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=NodePlan,
+            )
+        )
+
+    # Parse and create nodes
+    import json
+    plan_data = json.loads(plan_response.text)
+    nodes = plan_data.get("nodes", [])
+
+    print(f"[PLAN COMPLETE] Creating {len(nodes)} nodes...\n")
+
+    for node in nodes:
+        print(f"[NODE CREATED] {node['name']}: {node['description']}")
+
+    return nodes
+
+chat = client.chats.create(
+    model="gemini-2.5-flash",
+    config=types.GenerateContentConfig(
+        temperature=0.5,
+        system_instruction=FINANCIAL_SYSTEM_PROMPT,
     )
+)
 
 def upload_file_from_path(file_path):
     """Upload a local file to the Gemini File API."""
@@ -62,7 +97,10 @@ def upload_file_from_path(file_path):
 
 print("Chat started. Commands:")
 print("  - Type 'upload:/path/to/file' to upload a local file")
+print("  - Type 'plan:your request' to plan and create nodes")
 print("  - Type 'quit' to exit\n")
+
+uploaded_files = []  # Track uploaded files across conversation
 
 while True:
     user_input = input("You: ")
@@ -81,18 +119,24 @@ while True:
 
             if uploaded:
                 file_refs.append(uploaded)
+                uploaded_files.append(uploaded)
                 print(f"Uploaded: {file_path}")
 
-        if file_refs:
-            print("Files uploaded. Ask a question about them:")
-            follow_up = input("You: ")
-            # Send message with uploaded files
-            response = chat.send_message_stream([*file_refs, follow_up])
-        else:
+        if not file_refs:
             print("No files were uploaded successfully.")
-            continue
+        continue
+
+    # Check if user wants to plan and create nodes
+    if user_input.startswith('plan:'):
+        request = user_input[5:].strip()
+        nodes = create_nodes_from_plan(request, uploaded_files if uploaded_files else None)
+        print(f"\n[COMPLETE] Created {len(nodes)} nodes based on your request.\n")
+        continue
+
+    # Normal chat message
+    if uploaded_files:
+        response = chat.send_message_stream([*uploaded_files, user_input])
     else:
-        # Normal message
         response = chat.send_message_stream(user_input)
 
     print("Agent: ", end="", flush=True)
