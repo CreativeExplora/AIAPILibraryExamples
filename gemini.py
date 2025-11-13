@@ -1,4 +1,5 @@
 import os
+import base64
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -96,6 +97,15 @@ while True:
 
     print("Agent: ", end="", flush=True)
     for chunk in response:
+        # Handle thought signatures
+        if hasattr(chunk, 'candidates') and chunk.candidates:
+            for candidate in chunk.candidates:
+                if hasattr(candidate, 'content') and candidate.content:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'thought_signature') and part.thought_signature:
+                            print(f"\n[THINKING]: {base64.b64encode(part.thought_signature).decode('utf-8')}\n", end="", flush=True)
+
+        # Handle text content
         if chunk.text:
             print(chunk.text, end="", flush=True)
     print()  # Newline after streaming completes
