@@ -1,5 +1,9 @@
 import os
 import base64
+import json
+from datetime import datetime
+from typing import Optional
+from uuid import uuid4
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -7,6 +11,7 @@ from dotenv import load_dotenv
 
 
 load_dotenv()
+nodes_table = []
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -26,45 +31,78 @@ The model should match the complexity of the user's input. For example, if the u
 
 client = genai.Client()
 
-class NodePlan(BaseModel):
-    nodes: list[dict] = Field(description="List of nodes to create, each with 'name' and 'description'")
+class AccountEntry(BaseModel):
+    """A single debit or credit entry."""
+    amount: str = Field(description="Amount for this entry")
+    account: str = Field(description="Account name")
 
-def create_nodes_from_plan(user_message, file_refs=None):
-    """Plan and create all nodes at once based on user input."""
-    print("\n[PLANNING] Analyzing input and planning nodes...")
+class Transaction(BaseModel):
+    """Transaction details for a financial node."""
+    name: str = Field(description="Name of the transaction")
+    debits: list[AccountEntry] = Field(description="List of debit entries")
+    credits: list[AccountEntry] = Field(description="List of credit entries")
 
-    # Create planning prompt
-    plan_prompt = f"{user_message}\n\n[INTERNAL] Create a comprehensive plan of all financial nodes needed. Return JSON with structure: {{'nodes': [{{'name': 'node_name', 'description': 'node_desc'}}]}}"
+class Node(BaseModel):
+    """Financial transaction node model matching database schema."""
+    node_name: str = Field(description="Name of the financial node")
+    constraints: Optional[list[str]] = Field(default=None, description="List of constraint strings for the node")
+    transaction: Optional[list[Transaction]] = Field(default=None, description="List of transactions for this node")
+    transaction_description: Optional[str] = Field(default=None, description="Description of the transaction")
+    absolute_start_utc: str = Field(description="Absolute start timestamp in UTC (ISO format)")
+    absolute_end_utc: Optional[str] = Field(default=None, description="Absolute end timestamp in UTC (ISO format)")
+    start_offset_rule: Optional[str] = Field(default=None, description="Rule for start offset")
+    end_offset_rule: Optional[str] = Field(default=None, description="Rule for end offset")
+    recurrence_rule: Optional[str] = Field(default=None, description="Recurrence rule for repeating transactions")
+    expected_value: float = Field(default=0, description="Expected numeric value")
 
-    # Get the plan
+def plan_and_create_nodes(user_message, file_refs=None):
+    """Plan and create nodes using structured output."""
+    print("\n[PLANNING] Creating nodes based on input...")
+
+    # Create comprehensive prompt
+    prompt = f"""{user_message}
+
+Create comprehensive financial nodes based on the input above. Model ALL details - create as many nodes as needed (50, 100, or more) to fully represent the business strategy or financial plan."""
+
+    # Get structured output
     if file_refs:
-        plan_response = client.models.generate_content(
+        response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[*file_refs, plan_prompt],
+            contents=[*file_refs, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=NodePlan,
+                response_schema=list[Node],
             )
         )
     else:
-        plan_response = client.models.generate_content(
+        response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=plan_prompt,
+            contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=NodePlan,
+                response_schema=list[Node],
             )
         )
 
-    # Parse and create nodes
-    import json
-    plan_data = json.loads(plan_response.text)
-    nodes = plan_data.get("nodes", [])
+    # Parse nodes
+    nodes = json.loads(response.text)
 
-    print(f"[PLAN COMPLETE] Creating {len(nodes)} nodes...\n")
+    print(f"\n[CREATED] {len(nodes)} nodes:\n")
 
-    for node in nodes:
-        print(f"[NODE CREATED] {node['name']}: {node['description']}")
+    for idx, node in enumerate(nodes, 1):
+        nodes_table.append(node)
+        print(f"--- Node {idx} ---")
+        print(f"node_name: {node['node_name']}")
+        print(f"constraints: {node.get('constraints')}")
+        print(f"transaction: {node.get('transaction')}")
+        print(f"transaction_description: {node.get('transaction_description')}")
+        print(f"absolute_start_utc: {node['absolute_start_utc']}")
+        print(f"absolute_end_utc: {node.get('absolute_end_utc')}")
+        print(f"start_offset_rule: {node.get('start_offset_rule')}")
+        print(f"end_offset_rule: {node.get('end_offset_rule')}")
+        print(f"recurrence_rule: {node.get('recurrence_rule')}")
+        print(f"expected_value: {node.get('expected_value', 0)}")
+        print()
 
     return nodes
 
@@ -97,7 +135,7 @@ def upload_file_from_path(file_path):
 
 print("Chat started. Commands:")
 print("  - Type 'upload:/path/to/file' to upload a local file")
-print("  - Type 'plan:your request' to plan and create nodes")
+print("  - Type 'create:your request' to plan and create nodes")
 print("  - Type 'quit' to exit\n")
 
 uploaded_files = []  # Track uploaded files across conversation
@@ -126,11 +164,11 @@ while True:
             print("No files were uploaded successfully.")
         continue
 
-    # Check if user wants to plan and create nodes
-    if user_input.startswith('plan:'):
-        request = user_input[5:].strip()
-        nodes = create_nodes_from_plan(request, uploaded_files if uploaded_files else None)
-        print(f"\n[COMPLETE] Created {len(nodes)} nodes based on your request.\n")
+    # Check if user wants to create nodes
+    if user_input.startswith('create:'):
+        request = user_input[7:].strip()
+        nodes = plan_and_create_nodes(request, uploaded_files if uploaded_files else None)
+        print(f"\n[COMPLETE] {len(nodes)} nodes created.\n")
         continue
 
     # Normal chat message
