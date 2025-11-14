@@ -55,20 +55,15 @@ class Node(BaseModel):
     recurrence_rule: Optional[str] = Field(default=None, description="Recurrence rule for repeating transactions")
     expected_value: float = Field(default=0, description="Expected numeric value")
 
-def plan_and_create_nodes(user_message, file_refs=None):
-    """Plan and create nodes using structured output."""
-    print("\n[PLANNING] Creating nodes based on input...")
-
-    # Create comprehensive prompt
-    prompt = f"""{user_message}
-
-Create comprehensive financial nodes based on the input above. Model ALL details - create as many nodes as needed (50, 100, or more) to fully represent the business strategy or financial plan."""
+def create_nodes(user_message, file_refs=None):
+    """Generate nodes using structured output."""
+    print("\n[GENERATING NODES]...")
 
     # Get structured output
     if file_refs:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[*file_refs, prompt],
+            contents=[*file_refs, user_message],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=list[Node],
@@ -77,7 +72,7 @@ Create comprehensive financial nodes based on the input above. Model ALL details
     else:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=prompt,
+            contents=user_message,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=list[Node],
@@ -167,7 +162,7 @@ while True:
     # Check if user wants to create nodes
     if user_input.startswith('create:'):
         request = user_input[7:].strip()
-        nodes = plan_and_create_nodes(request, uploaded_files if uploaded_files else None)
+        nodes = create_nodes(request, uploaded_files if uploaded_files else None)
         print(f"\n[COMPLETE] {len(nodes)} nodes created.\n")
         continue
 
