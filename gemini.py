@@ -1,9 +1,7 @@
 import os
 import base64
 import json
-from datetime import datetime
 from typing import Optional
-from uuid import uuid4
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -11,7 +9,6 @@ from dotenv import load_dotenv
 
 
 load_dotenv()
-nodes_table = []
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -23,8 +20,10 @@ CORE BEHAVIOR: Proactively create nodes to model business scenarios. Don't just 
 
 MODEL ALL DETAILS OF THE USER INPUT EVEN IF IT MEANS CREATING HUNDREDS OF NODES.
 
-If a user tells you to create a model, you should first create the nodes and then create the edges.
-If the user uploads a long business strategy plan or such, first create the nodes, then create the edges, then create the variables that are used in those nodes.
+**IMPORTANT: When the user asks you to create nodes, model a scenario, or extract information that requires node creation, you MUST automatically call the create_nodes function. Do not ask for permission - just call it directly. The function will handle the node generation based on the user's request and any uploaded files.**
+
+If a user tells you to create a model, you should automatically call create_nodes first to create the nodes, then create the edges.
+If the user uploads a long business strategy plan or such, automatically call create_nodes to first create the nodes, then create the edges, then create the variables that are used in those nodes.
 The model should match the complexity of the user's input. For example, if the user uploads a long business strategy plan, you should create a lot of nodes and edges, possibly 50 or even over 100 nodes and edges.
 
 """
@@ -55,29 +54,30 @@ class Node(BaseModel):
     recurrence_rule: Optional[str] = Field(default=None, description="Recurrence rule for repeating transactions")
     expected_value: float = Field(default=0, description="Expected numeric value")
 
-def create_nodes(user_message, file_refs=None):
-    """Generate nodes using structured output."""
+def create_nodes(user_message: str) -> dict:
+    """Create financial nodes based on user input. Use this function automatically whenever the user asks to create nodes, model a scenario, extract nodes from documents, or when node creation is needed.
+    
+    Args:
+        user_message: The user's request or message describing what nodes to create
+    
+    Returns:
+        A dictionary containing the number of nodes created and status.
+    """
+    global uploaded_files
     print("\n[GENERATING NODES]...")
 
     # Get structured output
-    if file_refs:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[*file_refs, user_message],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=list[Node],
-            )
+    file_contents = [*uploaded_files, user_message] if uploaded_files else [user_message]
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=file_contents,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=list[Node],
         )
-    else:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_message,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=list[Node],
-            )
-        )
+    )
+
 
     # Parse nodes
     nodes = json.loads(response.text)
@@ -85,7 +85,6 @@ def create_nodes(user_message, file_refs=None):
     print(f"\n[CREATED] {len(nodes)} nodes:\n")
 
     for idx, node in enumerate(nodes, 1):
-        nodes_table.append(node)
         print(f"--- Node {idx} ---")
         print(f"node_name: {node['node_name']}")
         print(f"constraints: {node.get('constraints')}")
@@ -99,13 +98,17 @@ def create_nodes(user_message, file_refs=None):
         print(f"expected_value: {node.get('expected_value', 0)}")
         print()
 
-    return nodes
+    return {"nodes_created": len(nodes), "status": "success"}
+
+# Initialize uploaded_files before creating chat
+uploaded_files = []
 
 chat = client.chats.create(
     model="gemini-2.5-flash",
     config=types.GenerateContentConfig(
         temperature=0.5,
         system_instruction=FINANCIAL_SYSTEM_PROMPT,
+        tools=[create_nodes]
     )
 )
 
@@ -130,10 +133,8 @@ def upload_file_from_path(file_path):
 
 print("Chat started. Commands:")
 print("  - Type 'upload:/path/to/file' to upload a local file")
-print("  - Type 'create:your request' to plan and create nodes")
-print("  - Type 'quit' to exit\n")
-
-uploaded_files = []  # Track uploaded files across conversation
+print("  - Type 'quit' to exit")
+print("  - The assistant will automatically create nodes when needed\n")
 
 while True:
     user_input = input("You: ")
@@ -159,21 +160,24 @@ while True:
             print("No files were uploaded successfully.")
         continue
 
-    # Check if user wants to create nodes
-    if user_input.startswith('create:'):
-        request = user_input[7:].strip()
-        nodes = create_nodes(request, uploaded_files if uploaded_files else None)
-        print(f"\n[COMPLETE] {len(nodes)} nodes created.\n")
-        continue
-
-    # Normal chat message
-    if uploaded_files:
-        response = chat.send_message_stream([*uploaded_files, user_input])
-    else:
-        response = chat.send_message_stream(user_input)
-
+    # Normal chat message - handle function calling
+    message_content = [*uploaded_files, user_input] if uploaded_files else [user_input]
+    response = chat.send_message_stream(message_content)
+    
     print("Agent: ", end="", flush=True)
+    function_calls = []
+    last_chunk = None
+    
     for chunk in response:
+        last_chunk = chunk
+        # Handle function calls in streaming chunks
+        if hasattr(chunk, 'candidates') and chunk.candidates:
+            for candidate in chunk.candidates:
+                if hasattr(candidate, 'content') and candidate.content:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'function_call') and part.function_call:
+                            function_calls.append(part.function_call)
+        
         # Handle thought signatures
         if hasattr(chunk, 'candidates') and chunk.candidates:
             for candidate in chunk.candidates:
@@ -185,4 +189,17 @@ while True:
         # Handle text content
         if chunk.text:
             print(chunk.text, end="", flush=True)
+    
+    # Check final chunk for function calls if not found during streaming
+    if not function_calls and last_chunk:
+        if hasattr(last_chunk, 'candidates') and last_chunk.candidates:
+            for candidate in last_chunk.candidates:
+                if hasattr(candidate, 'content') and candidate.content:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'function_call') and part.function_call:
+                            function_calls.append(part.function_call)
+    
     print()  # Newline after streaming completes
+    
+    # Execute function calls - the SDK should handle this automatically, but we can also handle manually if needed
+    # The SDK will automatically call the function and send the response back
